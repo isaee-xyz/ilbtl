@@ -6,27 +6,43 @@ import { SplitPanelLayout } from "@/components/SplitPanelLayout";
 import { SuccessScreen } from "@/components/SuccessScreen";
 import { resendLeadOtp, savePendingLead, sendLeadOtp, verifyLeadOtp } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-
-type Step = "details" | "otp" | "success";
-type SuccessMode = "verified" | "pending";
+import { getRunnerLocation } from "@/lib/geolocation";
+import { indianMobileError, isValidIndianMobileInput } from "@/lib/phone";
+import {
+  COURSE_INTEREST_PICKER_OPTIONS,
+  NEET_MARK_RANGE_PICKER_OPTIONS,
+  type CourseInterestValue,
+  getCourseInterestLabel,
+  getNeetMarkRangeLabel,
+  isValidCourseInterest,
+} from "@/lib/lead-form-options";
+import { OptionPickerField } from "@/components/SheetOptionPicker";
 
 interface AddLeadFormProps {
   name: string;
   phone: string;
+  interestedInCourses: CourseInterestValue;
+  neetMarks: string;
   error: string | null;
   formId: string;
   onNameChange: (value: string) => void;
   onPhoneChange: (value: string) => void;
+  onInterestedChange: (value: CourseInterestValue) => void;
+  onNeetMarksChange: (value: string) => void;
   onSubmit: (e: FormEvent) => void;
 }
 
 function AddLeadForm({
   name,
   phone,
+  interestedInCourses,
+  neetMarks,
   error,
   formId,
   onNameChange,
   onPhoneChange,
+  onInterestedChange,
+  onNeetMarksChange,
   onSubmit,
 }: AddLeadFormProps) {
   return (
@@ -67,18 +83,43 @@ function AddLeadForm({
             className="w-full bg-transparent px-4 py-3.5 outline-none"
           />
         </div>
-        {phone.length > 0 && phone.length < 10 && (
-          <p className="mt-1.5 text-xs text-il-error">Enter a valid 10-digit number</p>
+        {indianMobileError(phone) && (
+          <p className="mt-1.5 text-xs text-il-error">{indianMobileError(phone)}</p>
         )}
         <p className="mt-2 text-xs text-il-neutral-50">
           We&apos;ll send a 6-digit OTP on WhatsApp. Valid for 5 minutes.
         </p>
       </div>
 
+      <OptionPickerField
+        id={`${formId}-neet`}
+        label="Previous NEET marks (optional)"
+        value={neetMarks}
+        placeholder="Select (optional)"
+        displayValue={getNeetMarkRangeLabel(neetMarks)}
+        options={NEET_MARK_RANGE_PICKER_OPTIONS}
+        onChange={onNeetMarksChange}
+        hint='Choose "Not applicable" if marks are unknown'
+      />
+
+      <OptionPickerField
+        id={`${formId}-interested`}
+        label="Interested to join Infinity Learn courses *"
+        value={interestedInCourses}
+        placeholder="Select"
+        displayValue={getCourseInterestLabel(interestedInCourses)}
+        options={COURSE_INTEREST_PICKER_OPTIONS}
+        onChange={onInterestedChange}
+        required
+      />
+
       {error && <p className="text-sm text-il-error">{error}</p>}
     </form>
   );
 }
+
+type Step = "details" | "otp" | "success";
+type SuccessMode = "verified" | "pending";
 
 function OtpVerificationForm({
   phone,
@@ -210,6 +251,8 @@ function AddLeadContent() {
   const [step, setStep] = useState<Step>("details");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [interestedInCourses, setInterestedInCourses] = useState<CourseInterestValue>("");
+  const [neetMarks, setNeetMarks] = useState("");
   const [maskedPhone, setMaskedPhone] = useState("");
   const [otp, setOtp] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -230,6 +273,8 @@ function AddLeadContent() {
     setStep("details");
     setName("");
     setPhone("");
+    setInterestedInCourses("");
+    setNeetMarks("");
     setMaskedPhone("");
     setOtp("");
     setError(null);
@@ -244,7 +289,14 @@ function AddLeadContent() {
     setError(null);
     setLoading(true);
     try {
-      const result = await sendLeadOtp(token, name.trim(), phone);
+      const neet = neetMarks.trim() === "" ? null : neetMarks.trim();
+      const result = await sendLeadOtp(
+        token,
+        name.trim(),
+        phone,
+        interestedInCourses === "yes",
+        neet,
+      );
       setMaskedPhone(result.masked_phone);
       setResendSeconds(result.resend_available_in_seconds);
       setOtp("");
@@ -287,7 +339,8 @@ function AddLeadContent() {
     setError(null);
     setLoading(true);
     try {
-      await verifyLeadOtp(token, phone, otp);
+      const location = await getRunnerLocation();
+      await verifyLeadOtp(token, phone, otp, location);
       setSavedName(name.trim());
       setSuccessMode("verified");
       setStep("success");
@@ -304,7 +357,8 @@ function AddLeadContent() {
     setError(null);
     setLoading(true);
     try {
-      await savePendingLead(token, phone);
+      const location = await getRunnerLocation();
+      await savePendingLead(token, phone, location);
       setSavedName(name.trim());
       setSuccessMode("pending");
       setStep("success");
@@ -347,6 +401,10 @@ function AddLeadContent() {
   }
 
   const mobileTitle = step === "otp" ? "Verify OTP" : "Add Lead";
+  const detailsFormValid =
+    Boolean(name.trim()) &&
+    isValidIndianMobileInput(phone) &&
+    isValidCourseInterest(interestedInCourses);
   const mobileSubmitLabel =
     step === "otp"
       ? loading
@@ -378,9 +436,13 @@ function AddLeadContent() {
                 formId="add-lead-mobile"
                 name={name}
                 phone={phone}
+                interestedInCourses={interestedInCourses}
+                neetMarks={neetMarks}
                 error={error}
                 onNameChange={setName}
                 onPhoneChange={setPhone}
+                onInterestedChange={setInterestedInCourses}
+                onNeetMarksChange={setNeetMarks}
                 onSubmit={handleSendOtp}
               />
             ) : (
@@ -407,7 +469,7 @@ function AddLeadContent() {
             disabled={
               loading ||
               (step === "details"
-                ? !name.trim() || phone.length < 10
+                ? !detailsFormValid
                 : otp.length < 6)
             }
             className="w-full rounded-full bg-white py-4 text-sm font-semibold text-il-blue-30 shadow-[0_8px_32px_rgba(0,0,0,0.2)] disabled:opacity-50"
@@ -452,9 +514,13 @@ function AddLeadContent() {
                     formId="add-lead-desktop"
                     name={name}
                     phone={phone}
+                    interestedInCourses={interestedInCourses}
+                    neetMarks={neetMarks}
                     error={error}
                     onNameChange={setName}
                     onPhoneChange={setPhone}
+                    onInterestedChange={setInterestedInCourses}
+                    onNeetMarksChange={setNeetMarks}
                     onSubmit={handleSendOtp}
                   />
                 ) : (
@@ -482,7 +548,7 @@ function AddLeadContent() {
                   disabled={
                     loading ||
                     (step === "details"
-                      ? !name.trim() || phone.length < 10
+                      ? !detailsFormValid
                       : otp.length < 6)
                   }
                   className="w-full rounded-xl bg-il-blue-30 py-4 text-sm font-semibold text-white hover:bg-il-blue-20 disabled:opacity-50"

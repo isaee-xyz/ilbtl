@@ -31,6 +31,7 @@ export function LoginPage() {
     if (authError) {
       setError(authError);
       clearAuthError();
+      setGoogleLoading(false);
     }
   }, [authError, clearAuthError]);
 

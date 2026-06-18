@@ -2,14 +2,14 @@ import { randomUUID } from "crypto";
 import {
   DuplicatePhoneError,
   InvalidOtpError,
-  OtpExpiredError,
   OtpResendCooldownError,
   OtpSessionNotFoundError,
 } from "../utils/errors.js";
 import { LeadModel, LeadOtpSessionModel, UserModel } from "../models/index.js";
 import type { Lead, LeadSummary } from "../types/index.js";
-import { isValidIndianMobile, normalizePhone } from "../utils/validators.js";
+import { parseIndianMobile } from "../utils/validators.js";
 import { getLeadSummary, grantMilestoneIfEligible, toLead } from "./lead.service.js";
+import { pushLeadToLsq } from "./lsq.service.js";
 
 export const OTP_TTL_MS = 5 * 60 * 1000;
 export const OTP_RESEND_COOLDOWN_MS = 30 * 1000;
@@ -24,11 +24,11 @@ function isDuplicateKeyError(error: unknown): boolean {
 }
 
 function assertValidPhone(phone: string): string {
-  const normalized = normalizePhone(phone);
-  if (!isValidIndianMobile(normalized)) {
-    throw new Error("Enter a valid 10-digit mobile number.");
+  const parsed = parseIndianMobile(phone);
+  if (!parsed.ok) {
+    throw new Error(parsed.error);
   }
-  return normalized;
+  return parsed.phone;
 }
 
 async function assertPhoneAvailable(student_phone: string): Promise<void> {
@@ -46,6 +46,8 @@ async function upsertOtpSession(input: {
   volunteerId: string;
   studentName: string;
   studentPhone: string;
+  interestedInCourses: boolean;
+  neetMarks: string | null;
   otp: string;
 }): Promise<void> {
   const now = new Date();
@@ -58,6 +60,8 @@ async function upsertOtpSession(input: {
 
   if (existing) {
     existing.student_name = input.studentName.trim();
+    existing.interested_in_courses = input.interestedInCourses;
+    existing.neet_marks = input.neetMarks;
     existing.otp = input.otp;
     existing.expires_at = expiresAt;
     existing.last_sent_at = now;
@@ -71,6 +75,8 @@ async function upsertOtpSession(input: {
       volunteer_id: input.volunteerId,
       student_name: input.studentName.trim(),
       student_phone: input.studentPhone,
+      interested_in_courses: input.interestedInCourses,
+      neet_marks: input.neetMarks,
       otp: input.otp,
       expires_at: expiresAt,
       last_sent_at: now,
@@ -83,6 +89,8 @@ async function upsertOtpSession(input: {
       {
         $set: {
           student_name: input.studentName.trim(),
+          interested_in_courses: input.interestedInCourses,
+          neet_marks: input.neetMarks,
           otp: input.otp,
           expires_at: expiresAt,
           last_sent_at: now,
@@ -96,6 +104,8 @@ export async function startLeadOtpSession(input: {
   volunteerId: string;
   studentName: string;
   studentPhone: string;
+  interestedInCourses: boolean;
+  neetMarks: string | null;
   otp: string;
 }): Promise<{ expiresInSeconds: number; resendAvailableInSeconds: number }> {
   const student_phone = assertValidPhone(input.studentPhone);
@@ -105,6 +115,8 @@ export async function startLeadOtpSession(input: {
     volunteerId: input.volunteerId,
     studentName: input.studentName,
     studentPhone: student_phone,
+    interestedInCourses: input.interestedInCourses,
+    neetMarks: input.neetMarks,
     otp: input.otp,
   });
 
@@ -146,12 +158,33 @@ export async function resendLeadOtpSession(input: {
   };
 }
 
+async function syncLeadToLsq(input: {
+  student_name: string;
+  student_phone: string;
+  status: "verified" | "unverified";
+  interested_in_courses: boolean;
+  neet_marks: string | null;
+  runner_location: string | null;
+  runner_city: string | null;
+  runner_state: string | null;
+  volunteer_name: string;
+  volunteer_email: string;
+}): Promise<void> {
+  const result = await pushLeadToLsq(input);
+  if (!result.ok && !result.skipped) {
+    console.error("[LSQ] lead sync failed:", result.error);
+  }
+}
+
 export async function verifyLeadOtpAndCreate(input: {
   volunteerId: string;
   studentPhone: string;
   otp: string;
   volunteerName: string;
   volunteerEmail: string;
+  runnerLocation?: string | null;
+  runnerCity?: string | null;
+  runnerState?: string | null;
 }): Promise<{ lead: Lead; summary: LeadSummary }> {
   const student_phone = assertValidPhone(input.studentPhone);
   const otp = input.otp.trim();
@@ -164,11 +197,6 @@ export async function verifyLeadOtpAndCreate(input: {
   });
 
   if (!session) throw new OtpSessionNotFoundError();
-
-  if (session.expires_at.getTime() < Date.now()) {
-    await LeadOtpSessionModel.deleteOne({ id: session.id });
-    throw new OtpExpiredError();
-  }
 
   if (session.otp !== otp) throw new InvalidOtpError();
 
@@ -189,6 +217,9 @@ export async function verifyLeadOtpAndCreate(input: {
       student_phone,
       status: "verified",
       verified_at: now,
+      runner_location: input.runnerLocation ?? null,
+      interested_in_courses: session.interested_in_courses,
+      neet_marks: session.neet_marks ?? null,
       created_at: now,
     });
 
@@ -200,7 +231,22 @@ export async function verifyLeadOtpAndCreate(input: {
     await LeadOtpSessionModel.deleteOne({ id: session.id });
 
     const summary = await getLeadSummary(input.volunteerId);
-    return { lead: toLead(lead), summary };
+    const leadRecord = toLead(lead);
+
+    void syncLeadToLsq({
+      student_name: leadRecord.student_name,
+      student_phone: leadRecord.student_phone,
+      status: "verified",
+      interested_in_courses: session.interested_in_courses,
+      neet_marks: session.neet_marks ?? null,
+      runner_location: input.runnerLocation ?? null,
+      runner_city: input.runnerCity ?? null,
+      runner_state: input.runnerState ?? null,
+      volunteer_name: input.volunteerName.trim(),
+      volunteer_email: input.volunteerEmail.trim().toLowerCase(),
+    });
+
+    return { lead: leadRecord, summary };
   } catch (error) {
     if (isDuplicateKeyError(error)) {
       throw new DuplicatePhoneError();
@@ -214,6 +260,9 @@ export async function savePendingLeadFromSession(input: {
   studentPhone: string;
   volunteerName: string;
   volunteerEmail: string;
+  runnerLocation?: string | null;
+  runnerCity?: string | null;
+  runnerState?: string | null;
 }): Promise<{ lead: Lead; summary: LeadSummary }> {
   const student_phone = assertValidPhone(input.studentPhone);
 
@@ -238,13 +287,31 @@ export async function savePendingLeadFromSession(input: {
       student_phone,
       status: "unverified",
       verified_at: null,
+      runner_location: input.runnerLocation ?? null,
+      interested_in_courses: session.interested_in_courses,
+      neet_marks: session.neet_marks ?? null,
       created_at: now,
     });
 
     await LeadOtpSessionModel.deleteOne({ id: session.id });
 
     const summary = await getLeadSummary(input.volunteerId);
-    return { lead: toLead(lead), summary };
+    const leadRecord = toLead(lead);
+
+    void syncLeadToLsq({
+      student_name: leadRecord.student_name,
+      student_phone: leadRecord.student_phone,
+      status: "unverified",
+      interested_in_courses: session.interested_in_courses,
+      neet_marks: session.neet_marks ?? null,
+      runner_location: input.runnerLocation ?? null,
+      runner_city: input.runnerCity ?? null,
+      runner_state: input.runnerState ?? null,
+      volunteer_name: input.volunteerName.trim(),
+      volunteer_email: input.volunteerEmail.trim().toLowerCase(),
+    });
+
+    return { lead: leadRecord, summary };
   } catch (error) {
     if (isDuplicateKeyError(error)) {
       throw new DuplicatePhoneError();

@@ -17,7 +17,7 @@ import type {
   WhatsAppQrInfo,
 } from "../types/index.js";
 import { buildScoutRef, buildWhatsAppQrUrl } from "../utils/whatsapp-qr.js";
-import { isValidIndianMobile, normalizePhone } from "../utils/validators.js";
+import { parseIndianMobile } from "../utils/validators.js";
 
 export interface WhatsAppLeadVerifyResult {
   leadId: string;
@@ -45,6 +45,8 @@ function toUserRecord(user: {
   verified_lead_count: number;
   whatsapp_qr_url?: string | null;
   whatsapp_qr_generated_at?: Date | null;
+  last_login_location?: string | null;
+  last_login_at?: Date | null;
   created_at: Date;
   updated_at: Date;
 }): UserRecord {
@@ -58,6 +60,8 @@ function toUserRecord(user: {
     whatsapp_qr_url: user.whatsapp_qr_url ?? null,
     whatsapp_qr_generated_at:
       user.whatsapp_qr_generated_at?.toISOString() ?? null,
+    last_login_location: user.last_login_location ?? null,
+    last_login_at: user.last_login_at?.toISOString() ?? null,
     created_at: user.created_at.toISOString(),
     updated_at: user.updated_at.toISOString(),
   };
@@ -72,6 +76,9 @@ export function toLead(lead: {
   student_phone: string;
   status: string;
   verified_at?: Date | null;
+  runner_location?: string | null;
+  interested_in_courses?: boolean;
+  neet_marks?: string | null;
   created_at: Date;
 }): Lead {
   return {
@@ -83,6 +90,9 @@ export function toLead(lead: {
     student_phone: lead.student_phone,
     status: lead.status as Lead["status"],
     verified_at: lead.verified_at?.toISOString() ?? null,
+    runner_location: lead.runner_location ?? null,
+    interested_in_courses: lead.interested_in_courses ?? true,
+    neet_marks: lead.neet_marks ?? null,
     created_at: lead.created_at.toISOString(),
   };
 }
@@ -460,8 +470,9 @@ export async function verifyLeadFromWhatsAppFirstMessage(input: {
   const volunteer = await UserModel.findOne({ id: input.volunteerId });
   if (!volunteer) return null;
 
-  const student_phone = normalizePhone(input.studentPhone);
-  if (!isValidIndianMobile(student_phone)) return null;
+  const parsedPhone = parseIndianMobile(input.studentPhone);
+  if (!parsedPhone.ok) return null;
+  const student_phone = parsedPhone.phone;
 
   const student_name = (input.studentName?.trim() || "WhatsApp Lead").slice(
     0,

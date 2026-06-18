@@ -17,6 +17,11 @@ import {
 } from "firebase/auth";
 import { getMe, syncUser } from "./api";
 import {
+  consumeLoginLocationCapture,
+  getRunnerLocation,
+  markLoginLocationCapture,
+} from "./geolocation";
+import {
   getFirebaseAuth,
   googleProvider,
   isFirebaseConfigured,
@@ -96,7 +101,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const clearAuthError = useCallback(() => setAuthError(null), []);
 
   const syncSession = useCallback(async (idToken: string) => {
-    const data = await syncUser(idToken);
+    const captureSource = consumeLoginLocationCapture();
+    const location =
+      captureSource === "google" ? await getRunnerLocation() : undefined;
+    const data = await syncUser(idToken, location);
     setUser(data.user);
     setSummary(data.summary);
     setToken(idToken);
@@ -204,6 +212,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     const auth = getFirebaseAuth();
     setAuthError(null);
+    markLoginLocationCapture("google");
 
     const startRedirect = async () => {
       sessionStorage.setItem(REDIRECT_PENDING_KEY, "1");
@@ -227,7 +236,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signInDemo = useCallback(async () => {
-    const res = await fetch("/api/v1/auth/demo", { method: "POST" });
+    const location = await getRunnerLocation();
+    const res = await fetch("/api/v1/auth/demo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(location),
+    });
     const text = await res.text();
     let data: { user?: UserRecord; summary?: LeadSummary; error?: string };
     try {

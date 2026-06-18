@@ -6,6 +6,7 @@ import type {
   WalletItem,
   WhatsAppQrInfo,
 } from "./types";
+import type { LoginLocationPayload } from "./geolocation";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(
   /\/$/,
@@ -35,10 +36,11 @@ async function apiFetch<T>(
   return data as T;
 }
 
-export const syncUser = (token: string) =>
+export const syncUser = (token: string, location?: LoginLocationPayload) =>
   apiFetch<{ user: UserRecord; summary: LeadSummary }>("/api/v1/auth/sync", {
     method: "POST",
     token,
+    body: location ? JSON.stringify(location) : undefined,
   });
 
 export const getMe = (token: string) =>
@@ -61,11 +63,18 @@ export const sendLeadOtp = (
   token: string,
   student_name: string,
   student_phone: string,
+  interested_in_courses: boolean,
+  neet_marks?: string | null,
 ) =>
   apiFetch<LeadOtpSendResult>("/api/v1/leads/otp/send", {
     method: "POST",
     token,
-    body: JSON.stringify({ student_name, student_phone }),
+    body: JSON.stringify({
+      student_name,
+      student_phone,
+      interested_in_courses,
+      neet_marks: neet_marks ?? null,
+    }),
   });
 
 export const resendLeadOtp = (token: string, student_phone: string) =>
@@ -79,6 +88,7 @@ export const verifyLeadOtp = (
   token: string,
   student_phone: string,
   otp: string,
+  location?: LoginLocationPayload,
 ) =>
   apiFetch<{
     id: string;
@@ -88,10 +98,14 @@ export const verifyLeadOtp = (
   }>("/api/v1/leads/otp/verify", {
     method: "POST",
     token,
-    body: JSON.stringify({ student_phone, otp }),
+    body: JSON.stringify({ student_phone, otp, ...location }),
   });
 
-export const savePendingLead = (token: string, student_phone: string) =>
+export const savePendingLead = (
+  token: string,
+  student_phone: string,
+  location?: LoginLocationPayload,
+) =>
   apiFetch<{
     id: string;
     status: string;
@@ -100,7 +114,7 @@ export const savePendingLead = (token: string, student_phone: string) =>
   }>("/api/v1/leads/pending", {
     method: "POST",
     token,
-    body: JSON.stringify({ student_phone }),
+    body: JSON.stringify({ student_phone, ...location }),
   });
 
 /** @deprecated Use sendLeadOtp + verifyLeadOtp */

@@ -10,7 +10,9 @@ const userSchema = new Schema(
     verified_lead_count: { type: Number, default: 0 },
     whatsapp_qr_url: { type: String, default: null },
     whatsapp_qr_generated_at: { type: Date, default: null },
-    scout_ref: { type: String, default: null, unique: true, sparse: true },
+    scout_ref: { type: String, unique: true, sparse: true },
+    last_login_location: { type: String, default: null },
+    last_login_at: { type: Date, default: null },
     created_at: { type: Date, required: true },
     updated_at: { type: Date, required: true },
   },
@@ -29,6 +31,9 @@ const leadSchema = new Schema(
     verified_at: { type: Date, default: null },
     whatsapp_replied_at: { type: Date, default: null },
     whatsapp_reply_text: { type: String, default: null },
+    runner_location: { type: String, default: null },
+    interested_in_courses: { type: Boolean, required: true, default: true },
+    neet_marks: { type: String, default: null },
     created_at: { type: Date, required: true },
   },
   { versionKey: false },
@@ -87,22 +92,28 @@ export const UserModel = mongoose.model("User", userSchema);
 export const LeadModel = mongoose.model("Lead", leadSchema);
 export const WalletItemModel = mongoose.model("WalletItem", walletItemSchema);
 export const MilestoneEventModel = mongoose.model("MilestoneEvent", milestoneEventSchema);
-export const LeadOtpSessionModel = mongoose.model(
-  "LeadOtpSession",
-  new Schema(
-    {
-      id: { type: String, required: true, unique: true },
-      volunteer_id: { type: String, required: true, index: true },
-      student_name: { type: String, required: true },
-      student_phone: { type: String, required: true, index: true },
-      otp: { type: String, required: true },
-      expires_at: { type: Date, required: true },
-      last_sent_at: { type: Date, required: true },
-      created_at: { type: Date, required: true },
-    },
-    { versionKey: false },
-  ).index({ volunteer_id: 1, student_phone: 1 }, { unique: true }),
+
+const leadOtpSessionSchema = new Schema(
+  {
+    id: { type: String, required: true, unique: true },
+    volunteer_id: { type: String, required: true, index: true },
+    student_name: { type: String, required: true },
+    student_phone: { type: String, required: true, index: true },
+    interested_in_courses: { type: Boolean, required: true, default: true },
+    neet_marks: { type: String, default: null },
+    otp: { type: String, required: true },
+    expires_at: { type: Date, required: true },
+    last_sent_at: { type: Date, required: true },
+    created_at: { type: Date, required: true },
+  },
+  { versionKey: false },
 );
+
+leadOtpSessionSchema.index({ volunteer_id: 1, student_phone: 1 }, { unique: true });
+// MongoDB TTL — documents removed when expires_at is reached (OTP lifetime).
+leadOtpSessionSchema.index({ expires_at: 1 }, { expireAfterSeconds: 0 });
+
+export const LeadOtpSessionModel = mongoose.model("LeadOtpSession", leadOtpSessionSchema);
 
 export const WhatsAppInboundModel = mongoose.model(
   "WhatsAppInbound",

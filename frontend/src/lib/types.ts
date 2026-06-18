@@ -6,6 +6,8 @@ export interface LeadRecord {
   student_phone: string;
   status: LeadStatus;
   verified_at: string | null;
+  interested_in_courses?: boolean;
+  neet_marks?: string | null;
   created_at: string;
 }
 
@@ -18,6 +20,8 @@ export interface UserRecord {
   verified_lead_count: number;
   whatsapp_qr_url?: string | null;
   whatsapp_qr_generated_at?: string | null;
+  last_login_location?: string | null;
+  last_login_at?: string | null;
   created_at: string;
   updated_at: string;
 }

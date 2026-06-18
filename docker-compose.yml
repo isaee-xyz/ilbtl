@@ -3,6 +3,7 @@
 
 services:
   backend:
+    image: ${REGISTRY:-local}/backend:${DEPLOY_TAG:-dev}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -26,6 +27,7 @@ services:
       - ilbtl
 
   frontend:
+    image: ${REGISTRY:-local}/frontend:${DEPLOY_TAG:-dev}
     build:
       context: ./frontend
       dockerfile: Dockerfile

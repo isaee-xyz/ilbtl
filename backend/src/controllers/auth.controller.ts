@@ -3,6 +3,8 @@ import { getLeadSummary, getUserByFirebaseUid, upsertUser } from "../services/le
 import { applyUserLoginLocation } from "../services/location.service.js";
 import { parseLoginLocationBody } from "../utils/validators.js";
 import { authPayload } from "../views/api.view.js";
+import { getAuthClient } from "../config/firebase.js";
+import { isDemoAuthAllowed } from "../middleware/auth.middleware.js";
 
 async function handleLoginLocation(
   req: Request,
@@ -25,11 +27,11 @@ export async function syncAuth(req: Request, res: Response) {
 
   try {
     const token = authHeader.slice(7);
-    const payload = JSON.parse(
-      Buffer.from(token.split(".")[1], "base64url").toString(),
-    );
-    const uid = payload.user_id ?? payload.sub;
-    const email = payload.email;
+
+    // Verify the Firebase ID token's signature/expiry before trusting any claim.
+    const decoded = await getAuthClient().verifyIdToken(token);
+    const uid = decoded.uid;
+    const email = decoded.email;
     if (!uid || !email) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -37,8 +39,8 @@ export async function syncAuth(req: Request, res: Response) {
     let user = await upsertUser({
       firebase_uid: uid,
       email,
-      full_name: payload.name ?? email.split("@")[0],
-      photo_url: payload.picture ?? null,
+      full_name: decoded.name ?? email.split("@")[0],
+      photo_url: decoded.picture ?? null,
     });
 
     try {
@@ -54,15 +56,7 @@ export async function syncAuth(req: Request, res: Response) {
     const summary = await getLeadSummary(user.id);
     return res.json(authPayload(user, summary));
   } catch (e) {
-    const message = e instanceof Error ? e.message : "";
-    if (/E11000 duplicate key/.test(message)) {
-      console.error("syncAuth duplicate key (scout_ref index):", e);
-      return res.status(503).json({
-        error:
-          "Sign-in is temporarily unavailable. Please try again in a minute or contact support.",
-      });
-    }
-    if (message) console.error("syncAuth failed:", e);
+    if (e instanceof Error && e.message) console.error("syncAuth failed:", e);
     return res.status(401).json({ error: "Unauthorized" });
   }
 }
@@ -74,6 +68,9 @@ export async function getMe(_req: Request, res: Response) {
 }
 
 export async function demoLogin(req: Request, res: Response) {
+  if (!isDemoAuthAllowed()) {
+    return res.status(403).json({ error: "Demo sign-in is disabled." });
+  }
   try {
     let user = await upsertUser({
       firebase_uid: "demo-volunteer-001",

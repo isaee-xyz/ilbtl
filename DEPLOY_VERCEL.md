@@ -82,6 +82,11 @@ Add these for the **Production** (and Preview) environments:
 - **First deploy seeds nothing.** Firestore starts empty; users are created on
   first login, leads on first capture.
 - **Gupshup webhook URL:** `https://<your-domain>/api/webhooks/gupshup?secret=<GUPSHUP_WEBHOOK_SECRET>`.
+- **Auth is verified server-side.** Real Firebase ID tokens are validated with
+  `verifyIdToken` (signature + expiry) before any user is trusted or created.
+- **Demo sign-in is disabled in production** (it bypasses verification). To
+  re-enable it on a deployment, set `ALLOW_DEMO_AUTH=true` — only do this for a
+  throwaway/demo environment, never for real data.
 - The `backend/lambda/` and `docker-compose.yml` paths are **legacy** (AWS/Docker
   + MongoDB) and are not used by the Vercel deployment.
 - Local dev still uses a root `.env` (copy from `.env.example`) and

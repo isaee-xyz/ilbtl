@@ -1,5 +1,6 @@
 import { getApps, initializeApp, cert, applicationDefault } from "firebase-admin/app";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
+import { getAuth, type Auth } from "firebase-admin/auth";
 
 let firestore: Firestore | null = null;
 
@@ -60,4 +61,10 @@ export function getDb(): Firestore {
 /** True once a Firestore handle exists — used by the health check. */
 export function isDbInitialized(): boolean {
   return firestore !== null;
+}
+
+/** Firebase Auth (Admin) — used to verify client ID tokens. Ensures init first. */
+export function getAuthClient(): Auth {
+  getDb(); // guarantees initAdminApp() has run
+  return getAuth();
 }

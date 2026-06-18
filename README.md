@@ -26,34 +26,38 @@ npm run dev
 - **API:** http://localhost:3001  
 - **Env:** single `.env` at project root  
 
-Click **Continue in Demo Mode** on login (no Firebase required).
+Click **Continue in Demo Mode** on login to skip Google sign-in. The backend
+still needs Firestore credentials — set `FIREBASE_SERVICE_ACCOUNT` (or
+`GOOGLE_APPLICATION_CREDENTIALS`) in `.env`. See [.env.example](./.env.example).
 
 ## Project structure
 
 ```
-frontend/   # React PWA (Vite)
-backend/    # Express API (MVC)
-backend/lambda/  # AWS Lambda — Gupshup webhook (auto-scaling)
-.env        # secrets (gitignored) — copy from .env.example
-docker-compose.yml
+frontend/        # React PWA (Vite)
+backend/         # Express API (MVC) — Firestore via firebase-admin
+api/index.js     # Vercel serverless entry (wraps the Express app)
+vercel.json      # Vercel build + routing config
+backend/lambda/  # AWS Lambda — Gupshup webhook (legacy)
+.env             # secrets (gitignored) — copy from .env.example
+docker-compose.yml  # legacy Docker path
 ```
 
-## Production deploy
+## Production deploy — Vercel + Firestore
 
-```bash
-cp .env.example .env   # production values on server
-docker compose up --build -d
-```
+The app deploys as a single Vercel project: the Vite frontend as static assets,
+the Express API as a serverless function under `/api`, and **Cloud Firestore** as
+the database. All secrets are set as Vercel environment variables — nothing
+sensitive is committed.
 
-Full guide: **[backend/docs/DEPLOY.md](./backend/docs/DEPLOY.md)** — Docker, HTTPS, MongoDB Atlas, Firebase, Gupshup.
+Full guide: **[DEPLOY_VERCEL.md](./DEPLOY_VERCEL.md)**.
 
-**WhatsApp webhook (Gupshup callback):** [backend/docs/WHATSAPP_WEBHOOK.md](./backend/docs/WHATSAPP_WEBHOOK.md) · **Lambda (DevOps):** [backend/lambda/DEVOPS.md](./backend/lambda/DEVOPS.md)
+**WhatsApp webhook (Gupshup callback):** `https://<domain>/api/webhooks/gupshup?secret=<GUPSHUP_WEBHOOK_SECRET>`
 
 ## Summary
 
 - **Auth:** Firebase Google sign-in
-- **Hosting:** Docker (`frontend` + `backend` containers)
-- **Webhook:** AWS Lambda Function URL (recommended) or Docker `/api/webhooks/...`
-- **Database:** MongoDB Atlas
+- **Hosting:** Vercel (static frontend + serverless Express API)
+- **Database:** Cloud Firestore (Firebase Admin SDK)
 - **Lead capture:** Student name + phone; verified / unverified status
 - **Rewards:** Wallet entry at each 100 verified leads milestone
+- **Legacy paths:** Docker (`docker-compose.yml`) and AWS Lambda (`backend/lambda/`) — not used by the Vercel deploy

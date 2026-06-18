@@ -2,12 +2,14 @@ import "./config/env.js";
 import { readFile } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
-import { connectDb, disconnectDb } from "./config/database.js";
+import { connectDb } from "./config/database.js";
 import {
-  LeadModel,
-  MilestoneEventModel,
-  UserModel,
-  WalletItemModel,
+  firstOf,
+  leadsCol,
+  milestoneEventsCol,
+  milestoneId,
+  usersCol,
+  walletItemsCol,
 } from "./models/index.js";
 import type { DbSchema } from "./types/index.js";
 
@@ -17,7 +19,7 @@ const JSON_PATH = path.join(__dirname, "..", "data", "db.json");
 async function main() {
   await connectDb();
 
-  const existingLeads = await LeadModel.countDocuments();
+  const existingLeads = (await leadsCol().count().get()).data().count;
   if (existingLeads > 0) {
     console.log("Database already has data — skipping seed.");
     return;
@@ -38,22 +40,25 @@ async function main() {
   );
 
   for (const user of Object.values(data.users)) {
-    await UserModel.updateOne(
-      { firebase_uid: user.firebase_uid },
-      {
-        $setOnInsert: {
-          id: user.id,
-          firebase_uid: user.firebase_uid,
-          email: user.email,
-          full_name: user.full_name,
-          photo_url: user.photo_url,
-          verified_lead_count: user.verified_lead_count,
-          created_at: new Date(user.created_at),
-          updated_at: new Date(user.updated_at),
-        },
-      },
-      { upsert: true },
+    const existing = await firstOf(
+      usersCol().where("firebase_uid", "==", user.firebase_uid),
     );
+    if (existing) continue;
+    await usersCol().doc(user.id).set({
+      id: user.id,
+      firebase_uid: user.firebase_uid,
+      email: user.email,
+      full_name: user.full_name,
+      photo_url: user.photo_url ?? null,
+      verified_lead_count: user.verified_lead_count,
+      whatsapp_qr_url: null,
+      whatsapp_qr_generated_at: null,
+      scout_ref: null,
+      last_login_location: null,
+      last_login_at: null,
+      created_at: new Date(user.created_at),
+      updated_at: new Date(user.updated_at),
+    });
   }
 
   for (const lead of data.leads) {
@@ -64,7 +69,7 @@ async function main() {
     seenPhones.add(lead.student_phone);
 
     const volunteer = usersById[lead.volunteer_id];
-    await LeadModel.create({
+    await leadsCol().doc(lead.id).set({
       id: lead.id,
       volunteer_id: lead.volunteer_id,
       volunteer_name: volunteer?.full_name ?? "Unknown",
@@ -73,13 +78,19 @@ async function main() {
       student_phone: lead.student_phone,
       status: lead.status,
       verified_at: lead.verified_at ? new Date(lead.verified_at) : null,
+      whatsapp_replied_at: null,
+      whatsapp_reply_text: null,
+      runner_location: null,
+      interested_in_courses: lead.interested_in_courses ?? true,
+      neet_marks: lead.neet_marks ?? null,
       created_at: new Date(lead.created_at),
     });
   }
 
   for (const event of data.milestone_events) {
-    await MilestoneEventModel.create({
-      id: event.id,
+    const id = milestoneId(event.user_id, event.milestone_number);
+    await milestoneEventsCol().doc(id).set({
+      id,
       user_id: event.user_id,
       milestone_number: event.milestone_number,
       verified_count_at_trigger: event.verified_count_at_trigger,
@@ -89,10 +100,10 @@ async function main() {
   }
 
   for (const item of data.wallet_items) {
-    await WalletItemModel.create({
+    await walletItemsCol().doc(item.id).set({
       id: item.id,
       user_id: item.user_id,
-      milestone_event_id: item.milestone_event_id,
+      milestone_event_id: milestoneId(item.user_id, item.milestone_number),
       reward_type: item.reward_type,
       coupon_code: item.coupon_code,
       coupon_value: item.coupon_value,
@@ -105,9 +116,7 @@ async function main() {
   console.log(`Seeded ${Object.keys(data.users).length} users and ${seenPhones.size} leads.`);
 }
 
-main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(() => disconnectDb());
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

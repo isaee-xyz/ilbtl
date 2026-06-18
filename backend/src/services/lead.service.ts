@@ -1,10 +1,16 @@
 import { randomUUID } from "crypto";
 import { DuplicatePhoneError } from "../utils/errors.js";
+import { getDb } from "../config/firebase.js";
 import {
-  LeadModel,
-  MilestoneEventModel,
-  UserModel,
-  WalletItemModel,
+  getById,
+  firstOf,
+  leadsCol,
+  usersCol,
+  walletItemsCol,
+  milestoneEventsCol,
+  milestoneId,
+  type LeadDoc,
+  type UserDoc,
 } from "../models/index.js";
 import type {
   Lead,
@@ -27,29 +33,7 @@ export interface WhatsAppLeadVerifyResult {
   milestone: MilestoneEvent | null;
 }
 
-function isDuplicateKeyError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code: number }).code === 11000
-  );
-}
-
-function toUserRecord(user: {
-  id: string;
-  firebase_uid: string;
-  email: string;
-  full_name: string;
-  photo_url?: string | null;
-  verified_lead_count: number;
-  whatsapp_qr_url?: string | null;
-  whatsapp_qr_generated_at?: Date | null;
-  last_login_location?: string | null;
-  last_login_at?: Date | null;
-  created_at: Date;
-  updated_at: Date;
-}): UserRecord {
+function toUserRecord(user: UserDoc): UserRecord {
   return {
     id: user.id,
     firebase_uid: user.firebase_uid,
@@ -67,20 +51,7 @@ function toUserRecord(user: {
   };
 }
 
-export function toLead(lead: {
-  id: string;
-  volunteer_id: string;
-  volunteer_name?: string;
-  volunteer_email?: string;
-  student_name: string;
-  student_phone: string;
-  status: string;
-  verified_at?: Date | null;
-  runner_location?: string | null;
-  interested_in_courses?: boolean;
-  neet_marks?: string | null;
-  created_at: Date;
-}): Lead {
+export function toLead(lead: LeadDoc): Lead {
   return {
     id: lead.id,
     volunteer_id: lead.volunteer_id,
@@ -97,56 +68,67 @@ export function toLead(lead: {
   };
 }
 
-export async function backfillLeadVolunteerFields(): Promise<void> {
-  const leads = await LeadModel.find({
-    $or: [
-      { volunteer_name: { $exists: false } },
-      { volunteer_email: { $exists: false } },
-    ],
-  });
+/** All leads belonging to a volunteer, newest first. */
+async function leadsForVolunteer(userId: string): Promise<LeadDoc[]> {
+  const snap = await leadsCol().where("volunteer_id", "==", userId).get();
+  return snap.docs
+    .map((d) => d.data())
+    .sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+}
 
-  for (const lead of leads) {
-    const user = await UserModel.findOne({ id: lead.volunteer_id });
+/** Lookup a lead globally by its (normalised) student phone. */
+async function findLeadByPhone(student_phone: string): Promise<LeadDoc | null> {
+  return firstOf(leadsCol().where("student_phone", "==", student_phone));
+}
+
+export async function backfillLeadVolunteerFields(): Promise<void> {
+  const snap = await leadsCol().get();
+  for (const doc of snap.docs) {
+    const lead = doc.data();
+    if (lead.volunteer_name && lead.volunteer_email) continue;
+    const user = await getById(usersCol(), lead.volunteer_id);
     if (!user) continue;
-    lead.volunteer_name = user.full_name;
-    lead.volunteer_email = user.email;
-    await lead.save();
+    await leadsCol().doc(lead.id).update({
+      volunteer_name: user.full_name,
+      volunteer_email: user.email,
+    });
   }
 }
 
 export async function getRunnerLeadStats(
   minLeads = 100,
 ): Promise<RunnerLeadStats[]> {
-  const rows = await LeadModel.aggregate<{
-    _id: string;
-    volunteer_name: string;
-    volunteer_email: string;
-    total_leads: number;
-    verified_leads: number;
-  }>([
-    {
-      $group: {
-        _id: "$volunteer_id",
-        volunteer_name: { $first: "$volunteer_name" },
-        volunteer_email: { $first: "$volunteer_email" },
-        total_leads: { $sum: 1 },
-        verified_leads: {
-          $sum: { $cond: [{ $eq: ["$status", "verified"] }, 1, 0] },
-        },
-      },
-    },
-    { $match: { total_leads: { $gte: minLeads } } },
-    { $sort: { total_leads: -1 } },
-  ]);
+  const snap = await leadsCol().get();
 
-  return rows.map((row) => ({
-    volunteer_id: row._id,
-    volunteer_name: row.volunteer_name ?? "Unknown",
-    volunteer_email: row.volunteer_email ?? "",
-    total_leads: row.total_leads,
-    verified_leads: row.verified_leads,
-    unverified_leads: row.total_leads - row.verified_leads,
-  }));
+  const byVolunteer = new Map<
+    string,
+    { name: string; email: string; total: number; verified: number }
+  >();
+
+  for (const doc of snap.docs) {
+    const lead = doc.data();
+    const entry = byVolunteer.get(lead.volunteer_id) ?? {
+      name: lead.volunteer_name || "Unknown",
+      email: lead.volunteer_email || "",
+      total: 0,
+      verified: 0,
+    };
+    entry.total += 1;
+    if (lead.status === "verified") entry.verified += 1;
+    byVolunteer.set(lead.volunteer_id, entry);
+  }
+
+  return [...byVolunteer.entries()]
+    .filter(([, e]) => e.total >= minLeads)
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([volunteer_id, e]) => ({
+      volunteer_id,
+      volunteer_name: e.name,
+      volunteer_email: e.email,
+      total_leads: e.total,
+      verified_leads: e.verified,
+      unverified_leads: e.total - e.verified,
+    }));
 }
 
 export async function upsertUser(input: {
@@ -156,62 +138,58 @@ export async function upsertUser(input: {
   photo_url: string | null;
 }): Promise<UserRecord> {
   const now = new Date();
-  const existing = await UserModel.findOne({ firebase_uid: input.firebase_uid });
+  const existing = await firstOf(
+    usersCol().where("firebase_uid", "==", input.firebase_uid),
+  );
 
   if (existing) {
-    existing.email = input.email;
-    existing.full_name = input.full_name;
-    existing.photo_url = input.photo_url;
-    existing.updated_at = now;
-    await existing.save();
-    return toUserRecord(existing);
+    await usersCol().doc(existing.id).update({
+      email: input.email,
+      full_name: input.full_name,
+      photo_url: input.photo_url,
+      updated_at: now,
+    });
+    return toUserRecord({
+      ...existing,
+      email: input.email,
+      full_name: input.full_name,
+      photo_url: input.photo_url,
+      updated_at: now,
+    });
   }
 
-  const user = await UserModel.create({
+  const user: UserDoc = {
     id: randomUUID(),
     firebase_uid: input.firebase_uid,
     email: input.email,
     full_name: input.full_name,
     photo_url: input.photo_url,
     verified_lead_count: 0,
+    whatsapp_qr_url: null,
+    whatsapp_qr_generated_at: null,
+    scout_ref: null,
+    last_login_location: null,
+    last_login_at: null,
     created_at: now,
     updated_at: now,
-  });
+  };
+  await usersCol().doc(user.id).set(user);
   return toUserRecord(user);
 }
 
 export async function getUserByFirebaseUid(
   firebase_uid: string,
 ): Promise<UserRecord | null> {
-  const user = await UserModel.findOne({ firebase_uid });
+  const user = await firstOf(usersCol().where("firebase_uid", "==", firebase_uid));
   return user ? toUserRecord(user) : null;
 }
 
-function resolveWhatsAppQrUrl(user: {
-  id: string;
-  full_name: string;
-  scout_ref?: string | null;
-  whatsapp_qr_url?: string | null;
-  whatsapp_qr_generated_at?: Date | null;
-}): string | null {
+function toWhatsAppQrInfo(user: UserDoc): WhatsAppQrInfo {
   const hasQr =
     Boolean(user.whatsapp_qr_generated_at) ||
     Boolean(user.whatsapp_qr_url) ||
     Boolean(user.scout_ref);
-
-  if (!hasQr) return null;
-
-  return buildWhatsAppQrUrl(user.full_name);
-}
-
-function toWhatsAppQrInfo(user: {
-  id: string;
-  full_name: string;
-  scout_ref?: string | null;
-  whatsapp_qr_url?: string | null;
-  whatsapp_qr_generated_at?: Date | null;
-}): WhatsAppQrInfo {
-  const url = resolveWhatsAppQrUrl(user);
+  const url = hasQr ? buildWhatsAppQrUrl(user.full_name) : null;
   return {
     generated: Boolean(url),
     url,
@@ -222,18 +200,24 @@ function toWhatsAppQrInfo(user: {
 export async function getWhatsAppQrForUser(
   userId: string,
 ): Promise<WhatsAppQrInfo | null> {
-  const user = await UserModel.findOne({ id: userId });
+  const user = await getById(usersCol(), userId);
   if (!user) return null;
 
   if (user.whatsapp_qr_generated_at || user.whatsapp_qr_url || user.scout_ref) {
+    const updates: Partial<UserDoc> = {};
     if (!user.scout_ref) {
       user.scout_ref = buildScoutRef(user.id);
+      updates.scout_ref = user.scout_ref;
     }
     const url = buildWhatsAppQrUrl(user.full_name);
     if (user.whatsapp_qr_url !== url) {
       user.whatsapp_qr_url = url;
       user.updated_at = new Date();
-      await user.save();
+      updates.whatsapp_qr_url = url;
+      updates.updated_at = user.updated_at;
+    }
+    if (Object.keys(updates).length > 0) {
+      await usersCol().doc(user.id).update(updates);
     }
   }
 
@@ -243,35 +227,84 @@ export async function getWhatsAppQrForUser(
 export async function generateWhatsAppQrForUser(
   userId: string,
 ): Promise<WhatsAppQrInfo | null> {
-  const user = await UserModel.findOne({ id: userId });
+  const user = await getById(usersCol(), userId);
   if (!user) return null;
 
   const now = new Date();
-  if (!user.scout_ref) {
-    user.scout_ref = buildScoutRef(user.id);
-  }
+  if (!user.scout_ref) user.scout_ref = buildScoutRef(user.id);
   user.whatsapp_qr_url = buildWhatsAppQrUrl(user.full_name);
   user.whatsapp_qr_generated_at = now;
   user.updated_at = now;
-  await user.save();
+
+  await usersCol().doc(user.id).update({
+    scout_ref: user.scout_ref,
+    whatsapp_qr_url: user.whatsapp_qr_url,
+    whatsapp_qr_generated_at: now,
+    updated_at: now,
+  });
 
   return toWhatsAppQrInfo(user);
 }
 
 export async function getLeadsForUser(userId: string): Promise<Lead[]> {
-  const leads = await LeadModel.find({ volunteer_id: userId })
-    .sort({ created_at: -1 })
-    .lean();
+  const leads = await leadsForVolunteer(userId);
   return leads.map(toLead);
 }
 
 export async function getLeadSummary(userId: string): Promise<LeadSummary> {
-  const [verified, unverified, total] = await Promise.all([
-    LeadModel.countDocuments({ volunteer_id: userId, status: "verified" }),
-    LeadModel.countDocuments({ volunteer_id: userId, status: "unverified" }),
-    LeadModel.countDocuments({ volunteer_id: userId }),
-  ]);
-  return { verified, unverified, total };
+  const leads = await leadsForVolunteer(userId);
+  const verified = leads.filter((l) => l.status === "verified").length;
+  const unverified = leads.filter((l) => l.status === "unverified").length;
+  return { verified, unverified, total: leads.length };
+}
+
+/** Build a fully-populated lead document. */
+function buildLeadDoc(input: {
+  id?: string;
+  volunteer_id: string;
+  volunteer_name: string;
+  volunteer_email: string;
+  student_name: string;
+  student_phone: string;
+  status: string;
+  verified_at?: Date | null;
+  whatsapp_replied_at?: Date | null;
+  whatsapp_reply_text?: string | null;
+  runner_location?: string | null;
+  interested_in_courses?: boolean;
+  neet_marks?: string | null;
+  created_at: Date;
+}): LeadDoc {
+  return {
+    id: input.id ?? randomUUID(),
+    volunteer_id: input.volunteer_id,
+    volunteer_name: input.volunteer_name,
+    volunteer_email: input.volunteer_email,
+    student_name: input.student_name,
+    student_phone: input.student_phone,
+    status: input.status,
+    verified_at: input.verified_at ?? null,
+    whatsapp_replied_at: input.whatsapp_replied_at ?? null,
+    whatsapp_reply_text: input.whatsapp_reply_text ?? null,
+    runner_location: input.runner_location ?? null,
+    interested_in_courses: input.interested_in_courses ?? true,
+    neet_marks: input.neet_marks ?? null,
+    created_at: input.created_at,
+  };
+}
+
+/**
+ * Atomically create a lead, rejecting duplicates of student_phone.
+ * Throws DuplicatePhoneError if another lead already uses that phone.
+ */
+export async function createLeadDoc(lead: LeadDoc): Promise<void> {
+  await getDb().runTransaction(async (tx) => {
+    const dup = await tx.get(
+      leadsCol().where("student_phone", "==", lead.student_phone).limit(1),
+    );
+    if (!dup.empty) throw new DuplicatePhoneError();
+    tx.set(leadsCol().doc(lead.id), lead);
+  });
 }
 
 export async function createLead(
@@ -281,29 +314,34 @@ export async function createLead(
   volunteer_name: string,
   volunteer_email: string,
 ): Promise<{ lead: Lead; summary: LeadSummary }> {
-  const trimmedName = student_name.trim();
-  const now = new Date();
+  const lead = buildLeadDoc({
+    volunteer_id: userId,
+    volunteer_name: volunteer_name.trim(),
+    volunteer_email: volunteer_email.trim().toLowerCase(),
+    student_name: student_name.trim(),
+    student_phone,
+    status: "unverified",
+    created_at: new Date(),
+  });
 
-  try {
-    const lead = await LeadModel.create({
-      id: randomUUID(),
-      volunteer_id: userId,
-      volunteer_name: volunteer_name.trim(),
-      volunteer_email: volunteer_email.trim().toLowerCase(),
-      student_name: trimmedName,
-      student_phone,
-      status: "unverified",
-      verified_at: null,
-      created_at: now,
-    });
-    const summary = await getLeadSummary(userId);
-    return { lead: toLead(lead), summary };
-  } catch (error) {
-    if (isDuplicateKeyError(error)) {
-      throw new DuplicatePhoneError();
-    }
-    throw error;
-  }
+  await createLeadDoc(lead);
+  const summary = await getLeadSummary(userId);
+  return { lead: toLead(lead), summary };
+}
+
+/** Increment a user's verified count atomically and return the new value. */
+export async function incrementVerifiedCount(
+  userId: string,
+  now: Date,
+): Promise<number> {
+  return getDb().runTransaction(async (tx) => {
+    const ref = usersCol().doc(userId);
+    const snap = await tx.get(ref);
+    const current = snap.data()?.verified_lead_count ?? 0;
+    const next = current + 1;
+    tx.update(ref, { verified_lead_count: next, updated_at: now });
+    return next;
+  });
 }
 
 async function grantMilestoneReward(
@@ -311,93 +349,89 @@ async function grantMilestoneReward(
   milestoneNumber: number,
   verifiedCountAtTrigger: number,
 ): Promise<{ milestone: MilestoneEvent; walletItem: WalletItem } | null> {
-  const existing = await MilestoneEventModel.findOne({
-    user_id: userId,
-    milestone_number: milestoneNumber,
-  });
-  if (existing) return null;
-
   const now = new Date();
-  const milestoneId = randomUUID();
+  const mId = milestoneId(userId, milestoneNumber);
   const walletId = randomUUID();
   const couponCode = `AMZN-${randomUUID().slice(0, 4).toUpperCase()}-${randomUUID().slice(0, 4).toUpperCase()}`;
 
-  const createdMilestone = await MilestoneEventModel.create({
-    id: milestoneId,
-    user_id: userId,
-    milestone_number: milestoneNumber,
-    verified_count_at_trigger: verifiedCountAtTrigger,
-    acknowledged: false,
-    created_at: now,
+  const created = await getDb().runTransaction(async (tx) => {
+    const milestoneRef = milestoneEventsCol().doc(mId);
+    const existing = await tx.get(milestoneRef);
+    if (existing.exists) return false;
+
+    tx.set(milestoneRef, {
+      id: mId,
+      user_id: userId,
+      milestone_number: milestoneNumber,
+      verified_count_at_trigger: verifiedCountAtTrigger,
+      acknowledged: false,
+      created_at: now,
+    });
+    tx.set(walletItemsCol().doc(walletId), {
+      id: walletId,
+      user_id: userId,
+      milestone_event_id: mId,
+      reward_type: "amazon_coupon",
+      coupon_code: couponCode,
+      coupon_value: "₹500",
+      status: "active",
+      earned_at: now,
+      milestone_number: milestoneNumber,
+    });
+    return true;
   });
 
-  const createdWallet = await WalletItemModel.create({
-    id: walletId,
-    user_id: userId,
-    milestone_event_id: milestoneId,
-    reward_type: "amazon_coupon",
-    coupon_code: couponCode,
-    coupon_value: "₹500",
-    status: "active",
-    earned_at: now,
-    milestone_number: milestoneNumber,
-  });
+  if (!created) return null;
 
   return {
     milestone: {
-      id: createdMilestone.id,
-      user_id: createdMilestone.user_id,
-      milestone_number: createdMilestone.milestone_number,
-      verified_count_at_trigger: createdMilestone.verified_count_at_trigger,
-      acknowledged: createdMilestone.acknowledged,
-      created_at: createdMilestone.created_at.toISOString(),
+      id: mId,
+      user_id: userId,
+      milestone_number: milestoneNumber,
+      verified_count_at_trigger: verifiedCountAtTrigger,
+      acknowledged: false,
+      created_at: now.toISOString(),
     },
     walletItem: {
-      id: createdWallet.id,
-      user_id: createdWallet.user_id,
-      milestone_event_id: createdWallet.milestone_event_id,
+      id: walletId,
+      user_id: userId,
+      milestone_event_id: mId,
       reward_type: "amazon_coupon",
-      coupon_code: createdWallet.coupon_code,
-      coupon_value: createdWallet.coupon_value,
-      status: createdWallet.status as WalletItem["status"],
-      earned_at: createdWallet.earned_at.toISOString(),
-      milestone_number: createdWallet.milestone_number,
+      coupon_code: couponCode,
+      coupon_value: "₹500",
+      status: "active",
+      earned_at: now.toISOString(),
+      milestone_number: milestoneNumber,
     },
   };
 }
 
 /** Sync verified count from leads and create any missing milestone/wallet rewards. */
 export async function syncUserMilestones(userId: string): Promise<number> {
-  const user = await UserModel.findOne({ id: userId });
+  const user = await getById(usersCol(), userId);
   if (!user) return 0;
 
-  const verified = await LeadModel.countDocuments({
-    volunteer_id: userId,
-    status: "verified",
-  });
+  const leads = await leadsForVolunteer(userId);
+  const verified = leads.filter((l) => l.status === "verified").length;
 
-  user.verified_lead_count = verified;
-  user.updated_at = new Date();
-  await user.save();
+  await usersCol().doc(userId).update({
+    verified_lead_count: verified,
+    updated_at: new Date(),
+  });
 
   const milestoneCount = Math.floor(verified / 100);
   let created = 0;
-
-  for (let milestoneNumber = 1; milestoneNumber <= milestoneCount; milestoneNumber++) {
-    const reward = await grantMilestoneReward(
-      userId,
-      milestoneNumber,
-      milestoneNumber * 100,
-    );
+  for (let n = 1; n <= milestoneCount; n++) {
+    const reward = await grantMilestoneReward(userId, n, n * 100);
     if (reward) created++;
   }
-
   return created;
 }
 
 export async function backfillMilestones(): Promise<void> {
-  const users = await UserModel.find().lean();
-  for (const user of users) {
+  const snap = await usersCol().get();
+  for (const doc of snap.docs) {
+    const user = doc.data();
     const created = await syncUserMilestones(user.id);
     if (created > 0) {
       console.log(`Created ${created} milestone(s) for ${user.email}`);
@@ -406,33 +440,29 @@ export async function backfillMilestones(): Promise<void> {
 }
 
 export async function verifyLead(leadId: string) {
-  const lead = await LeadModel.findOne({ id: leadId });
+  const lead = await getById(leadsCol(), leadId);
   if (!lead || lead.status === "verified") {
     throw new Error("Lead not found or already verified");
   }
 
   const verifiedAt = new Date();
+  await leadsCol().doc(lead.id).update({
+    status: "verified",
+    verified_at: verifiedAt,
+  });
   lead.status = "verified";
   lead.verified_at = verifiedAt;
-  await lead.save();
 
-  const user = await UserModel.findOne({ id: lead.volunteer_id });
+  const user = await getById(usersCol(), lead.volunteer_id);
   if (!user) throw new Error("Volunteer not found");
 
-  user.verified_lead_count += 1;
-  user.updated_at = new Date();
-  await user.save();
+  const newCount = await incrementVerifiedCount(user.id, new Date());
 
   let milestone: MilestoneEvent | null = null;
   let walletItem: WalletItem | null = null;
 
-  if (user.verified_lead_count % 100 === 0) {
-    const milestoneNumber = user.verified_lead_count / 100;
-    const reward = await grantMilestoneReward(
-      user.id,
-      milestoneNumber,
-      user.verified_lead_count,
-    );
+  if (newCount % 100 === 0) {
+    const reward = await grantMilestoneReward(user.id, newCount / 100, newCount);
     if (reward) {
       milestone = reward.milestone;
       walletItem = reward.walletItem;
@@ -447,11 +477,9 @@ export async function grantMilestoneIfEligible(
   verifiedLeadCount: number,
 ): Promise<MilestoneEvent | null> {
   if (verifiedLeadCount % 100 !== 0) return null;
-
-  const milestoneNumber = verifiedLeadCount / 100;
   const reward = await grantMilestoneReward(
     userId,
-    milestoneNumber,
+    verifiedLeadCount / 100,
     verifiedLeadCount,
   );
   return reward?.milestone ?? null;
@@ -467,25 +495,23 @@ export async function verifyLeadFromWhatsAppFirstMessage(input: {
   messageText: string;
   repliedAt: Date;
 }): Promise<WhatsAppLeadVerifyResult | null> {
-  const volunteer = await UserModel.findOne({ id: input.volunteerId });
+  const volunteer = await getById(usersCol(), input.volunteerId);
   if (!volunteer) return null;
 
   const parsedPhone = parseIndianMobile(input.studentPhone);
   if (!parsedPhone.ok) return null;
   const student_phone = parsedPhone.phone;
 
-  const student_name = (input.studentName?.trim() || "WhatsApp Lead").slice(
-    0,
-    100,
-  );
+  const student_name = (input.studentName?.trim() || "WhatsApp Lead").slice(0, 100);
   const now = input.repliedAt;
 
-  let existing = await LeadModel.findOne({ student_phone });
+  const existing = await findLeadByPhone(student_phone);
   if (existing) {
     if (existing.status === "verified") {
-      existing.whatsapp_replied_at = now;
-      existing.whatsapp_reply_text = input.messageText;
-      await existing.save();
+      await leadsCol().doc(existing.id).update({
+        whatsapp_replied_at: now,
+        whatsapp_reply_text: input.messageText,
+      });
       return {
         leadId: existing.id,
         created: false,
@@ -495,94 +521,15 @@ export async function verifyLeadFromWhatsAppFirstMessage(input: {
       };
     }
 
-    existing.status = "verified";
-    existing.verified_at = now;
-    existing.whatsapp_replied_at = now;
-    existing.whatsapp_reply_text = input.messageText;
-    await existing.save();
-
-    volunteer.verified_lead_count += 1;
-    volunteer.updated_at = now;
-    await volunteer.save();
-
-    const milestone = await grantMilestoneIfEligible(
-      volunteer.id,
-      volunteer.verified_lead_count,
-    );
-
-    return {
-      leadId: existing.id,
-      created: false,
-      verified: true,
-      alreadyVerified: false,
-      milestone,
-    };
-  }
-
-  try {
-    const lead = await LeadModel.create({
-      id: randomUUID(),
-      volunteer_id: volunteer.id,
-      volunteer_name: volunteer.full_name,
-      volunteer_email: volunteer.email,
-      student_name,
-      student_phone,
+    await leadsCol().doc(existing.id).update({
       status: "verified",
       verified_at: now,
       whatsapp_replied_at: now,
       whatsapp_reply_text: input.messageText,
-      created_at: now,
     });
 
-    volunteer.verified_lead_count += 1;
-    volunteer.updated_at = now;
-    await volunteer.save();
-
-    const milestone = await grantMilestoneIfEligible(
-      volunteer.id,
-      volunteer.verified_lead_count,
-    );
-
-    return {
-      leadId: lead.id,
-      created: true,
-      verified: true,
-      alreadyVerified: false,
-      milestone,
-    };
-  } catch (error) {
-    if (!isDuplicateKeyError(error)) throw error;
-
-    existing = await LeadModel.findOne({ student_phone });
-    if (!existing) return null;
-
-    if (existing.status === "verified") {
-      existing.whatsapp_replied_at = now;
-      existing.whatsapp_reply_text = input.messageText;
-      await existing.save();
-      return {
-        leadId: existing.id,
-        created: false,
-        verified: false,
-        alreadyVerified: true,
-        milestone: null,
-      };
-    }
-
-    existing.status = "verified";
-    existing.verified_at = now;
-    existing.whatsapp_replied_at = now;
-    existing.whatsapp_reply_text = input.messageText;
-    await existing.save();
-
-    volunteer.verified_lead_count += 1;
-    volunteer.updated_at = now;
-    await volunteer.save();
-
-    const milestone = await grantMilestoneIfEligible(
-      volunteer.id,
-      volunteer.verified_lead_count,
-    );
+    const newCount = await incrementVerifiedCount(volunteer.id, now);
+    const milestone = await grantMilestoneIfEligible(volunteer.id, newCount);
 
     return {
       leadId: existing.id,
@@ -592,40 +539,99 @@ export async function verifyLeadFromWhatsAppFirstMessage(input: {
       milestone,
     };
   }
+
+  const lead = buildLeadDoc({
+    volunteer_id: volunteer.id,
+    volunteer_name: volunteer.full_name,
+    volunteer_email: volunteer.email,
+    student_name,
+    student_phone,
+    status: "verified",
+    verified_at: now,
+    whatsapp_replied_at: now,
+    whatsapp_reply_text: input.messageText,
+    created_at: now,
+  });
+
+  try {
+    await createLeadDoc(lead);
+  } catch (error) {
+    if (!(error instanceof DuplicatePhoneError)) throw error;
+    // Raced with another writer — fall back to verifying the now-existing lead.
+    const raced = await findLeadByPhone(student_phone);
+    if (!raced) return null;
+    if (raced.status !== "verified") {
+      await leadsCol().doc(raced.id).update({
+        status: "verified",
+        verified_at: now,
+        whatsapp_replied_at: now,
+        whatsapp_reply_text: input.messageText,
+      });
+      const newCount = await incrementVerifiedCount(volunteer.id, now);
+      const milestone = await grantMilestoneIfEligible(volunteer.id, newCount);
+      return {
+        leadId: raced.id,
+        created: false,
+        verified: true,
+        alreadyVerified: false,
+        milestone,
+      };
+    }
+    return {
+      leadId: raced.id,
+      created: false,
+      verified: false,
+      alreadyVerified: true,
+      milestone: null,
+    };
+  }
+
+  const newCount = await incrementVerifiedCount(volunteer.id, now);
+  const milestone = await grantMilestoneIfEligible(volunteer.id, newCount);
+
+  return {
+    leadId: lead.id,
+    created: true,
+    verified: true,
+    alreadyVerified: false,
+    milestone,
+  };
 }
 
 export async function getWalletItems(userId: string): Promise<WalletItem[]> {
-  const items = await WalletItemModel.find({ user_id: userId })
-    .sort({ earned_at: -1 })
-    .lean();
-
-  return items.map((item) => ({
-    id: item.id,
-    user_id: item.user_id,
-    milestone_event_id: item.milestone_event_id,
-    reward_type: item.reward_type as WalletItem["reward_type"],
-    coupon_code: item.coupon_code,
-    coupon_value: item.coupon_value,
-    status: item.status as WalletItem["status"],
-    earned_at: item.earned_at.toISOString(),
-    milestone_number: item.milestone_number,
-  }));
+  const snap = await walletItemsCol().where("user_id", "==", userId).get();
+  return snap.docs
+    .map((d) => d.data())
+    .sort((a, b) => b.earned_at.getTime() - a.earned_at.getTime())
+    .map((item) => ({
+      id: item.id,
+      user_id: item.user_id,
+      milestone_event_id: item.milestone_event_id,
+      reward_type: item.reward_type as WalletItem["reward_type"],
+      coupon_code: item.coupon_code,
+      coupon_value: item.coupon_value,
+      status: item.status as WalletItem["status"],
+      earned_at: item.earned_at.toISOString(),
+      milestone_number: item.milestone_number,
+    }));
 }
 
 export async function getPendingMilestone(
   userId: string,
 ): Promise<PendingMilestone | null> {
-  const event = await MilestoneEventModel.findOne({
-    user_id: userId,
-    acknowledged: false,
-  })
-    .sort({ created_at: -1 })
-    .lean();
-  if (!event) return null;
+  const snap = await milestoneEventsCol()
+    .where("user_id", "==", userId)
+    .where("acknowledged", "==", false)
+    .get();
+  if (snap.empty) return null;
 
-  const wallet = await WalletItemModel.findOne({
-    milestone_event_id: event.id,
-  }).lean();
+  const event = snap.docs
+    .map((d) => d.data())
+    .sort((a, b) => b.created_at.getTime() - a.created_at.getTime())[0]!;
+
+  const wallet = await firstOf(
+    walletItemsCol().where("milestone_event_id", "==", event.id),
+  );
 
   return {
     id: event.id,
@@ -643,9 +649,11 @@ export async function acknowledgeMilestone(
   userId: string,
   milestoneId: string,
 ): Promise<void> {
-  const result = await MilestoneEventModel.updateOne(
-    { id: milestoneId, user_id: userId },
-    { $set: { acknowledged: true } },
-  );
-  if (result.matchedCount === 0) throw new Error("Milestone not found");
+  const ref = milestoneEventsCol().doc(milestoneId);
+  const snap = await ref.get();
+  const event = snap.data();
+  if (!event || event.user_id !== userId) {
+    throw new Error("Milestone not found");
+  }
+  await ref.update({ acknowledged: true });
 }

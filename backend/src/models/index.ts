@@ -1,121 +1,167 @@
-import mongoose, { Schema } from "mongoose";
+import {
+  Timestamp,
+  FieldValue,
+  type CollectionReference,
+  type FirestoreDataConverter,
+  type QueryDocumentSnapshot,
+  type Query,
+} from "firebase-admin/firestore";
+import { getDb } from "../config/firebase.js";
 
-const userSchema = new Schema(
-  {
-    id: { type: String, required: true, unique: true },
-    firebase_uid: { type: String, required: true, unique: true },
-    email: { type: String, required: true },
-    full_name: { type: String, required: true },
-    photo_url: { type: String, default: null },
-    verified_lead_count: { type: Number, default: 0 },
-    whatsapp_qr_url: { type: String, default: null },
-    whatsapp_qr_generated_at: { type: Date, default: null },
-    scout_ref: { type: String, unique: true, sparse: true },
-    last_login_location: { type: String, default: null },
-    last_login_at: { type: Date, default: null },
-    created_at: { type: Date, required: true },
-    updated_at: { type: Date, required: true },
-  },
-  { versionKey: false },
-);
+export { FieldValue };
 
-const leadSchema = new Schema(
-  {
-    id: { type: String, required: true, unique: true },
-    volunteer_id: { type: String, required: true, index: true },
-    volunteer_name: { type: String, required: true, index: true },
-    volunteer_email: { type: String, required: true, index: true },
-    student_name: { type: String, required: true },
-    student_phone: { type: String, required: true, unique: true },
-    status: { type: String, required: true, default: "unverified" },
-    verified_at: { type: Date, default: null },
-    whatsapp_replied_at: { type: Date, default: null },
-    whatsapp_reply_text: { type: String, default: null },
-    runner_location: { type: String, default: null },
-    interested_in_courses: { type: Boolean, required: true, default: true },
-    neet_marks: { type: String, default: null },
-    created_at: { type: Date, required: true },
-  },
-  { versionKey: false },
-);
+// ── Document shapes (stored in Firestore, Dates ↔ Timestamps) ─────────────────
 
-const walletItemSchema = new Schema(
-  {
-    id: { type: String, required: true, unique: true },
-    user_id: { type: String, required: true, index: true },
-    milestone_event_id: { type: String, required: true, unique: true },
-    reward_type: { type: String, required: true },
-    coupon_code: { type: String, required: true },
-    coupon_value: { type: String, required: true },
-    status: { type: String, required: true, default: "active" },
-    earned_at: { type: Date, required: true },
-    milestone_number: { type: Number, required: true },
-  },
-  { versionKey: false },
-);
+export interface UserDoc {
+  id: string;
+  firebase_uid: string;
+  email: string;
+  full_name: string;
+  photo_url: string | null;
+  verified_lead_count: number;
+  whatsapp_qr_url: string | null;
+  whatsapp_qr_generated_at: Date | null;
+  scout_ref: string | null;
+  last_login_location: string | null;
+  last_login_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
 
-const milestoneEventSchema = new Schema(
-  {
-    id: { type: String, required: true, unique: true },
-    user_id: { type: String, required: true, index: true },
-    milestone_number: { type: Number, required: true },
-    verified_count_at_trigger: { type: Number, required: true },
-    acknowledged: { type: Boolean, default: false },
-    created_at: { type: Date, required: true },
-  },
-  { versionKey: false },
-);
+export interface LeadDoc {
+  id: string;
+  volunteer_id: string;
+  volunteer_name: string;
+  volunteer_email: string;
+  student_name: string;
+  student_phone: string;
+  status: string;
+  verified_at: Date | null;
+  whatsapp_replied_at: Date | null;
+  whatsapp_reply_text: string | null;
+  runner_location: string | null;
+  interested_in_courses: boolean;
+  neet_marks: string | null;
+  created_at: Date;
+}
 
-milestoneEventSchema.index({ user_id: 1, milestone_number: 1 }, { unique: true });
+export interface WalletItemDoc {
+  id: string;
+  user_id: string;
+  milestone_event_id: string;
+  reward_type: string;
+  coupon_code: string;
+  coupon_value: string;
+  status: string;
+  earned_at: Date;
+  milestone_number: number;
+}
 
-const whatsAppInboundSchema = new Schema(
-  {
-    id: { type: String, required: true, unique: true },
-    gupshup_message_id: { type: String, default: null, index: true, sparse: true },
-    from_phone: { type: String, required: true, index: true },
-    to_phone: { type: String, default: null },
-    message_text: { type: String, required: true },
-    sender_name: { type: String, default: null },
-    scout_ref: { type: String, default: null, index: true },
-    lead_id: { type: String, default: null, index: true },
-    volunteer_id: { type: String, default: null, index: true },
-    volunteer_name: { type: String, default: null },
-    volunteer_email: { type: String, default: null },
-    user_input: { type: String, default: null },
-    raw_payload: { type: Schema.Types.Mixed, default: null },
-    received_at: { type: Date, required: true },
-  },
-  { versionKey: false },
-);
+export interface MilestoneEventDoc {
+  id: string;
+  user_id: string;
+  milestone_number: number;
+  verified_count_at_trigger: number;
+  acknowledged: boolean;
+  created_at: Date;
+}
 
-export const UserModel = mongoose.model("User", userSchema);
-export const LeadModel = mongoose.model("Lead", leadSchema);
-export const WalletItemModel = mongoose.model("WalletItem", walletItemSchema);
-export const MilestoneEventModel = mongoose.model("MilestoneEvent", milestoneEventSchema);
+export interface LeadOtpSessionDoc {
+  id: string;
+  volunteer_id: string;
+  student_name: string;
+  student_phone: string;
+  interested_in_courses: boolean;
+  neet_marks: string | null;
+  otp: string;
+  expires_at: Date;
+  last_sent_at: Date;
+  created_at: Date;
+}
 
-const leadOtpSessionSchema = new Schema(
-  {
-    id: { type: String, required: true, unique: true },
-    volunteer_id: { type: String, required: true, index: true },
-    student_name: { type: String, required: true },
-    student_phone: { type: String, required: true, index: true },
-    interested_in_courses: { type: Boolean, required: true, default: true },
-    neet_marks: { type: String, default: null },
-    otp: { type: String, required: true },
-    expires_at: { type: Date, required: true },
-    last_sent_at: { type: Date, required: true },
-    created_at: { type: Date, required: true },
-  },
-  { versionKey: false },
-);
+export interface WhatsAppInboundDoc {
+  id: string;
+  gupshup_message_id: string | null;
+  from_phone: string;
+  to_phone: string | null;
+  message_text: string;
+  sender_name: string | null;
+  scout_ref: string | null;
+  lead_id: string | null;
+  volunteer_id: string | null;
+  volunteer_name: string | null;
+  volunteer_email: string | null;
+  user_input: string | null;
+  raw_payload: unknown;
+  received_at: Date;
+}
 
-leadOtpSessionSchema.index({ volunteer_id: 1, student_phone: 1 }, { unique: true });
-// MongoDB TTL — documents removed when expires_at is reached (OTP lifetime).
-leadOtpSessionSchema.index({ expires_at: 1 }, { expireAfterSeconds: 0 });
+// ── Timestamp → Date conversion on read ───────────────────────────────────────
 
-export const LeadOtpSessionModel = mongoose.model("LeadOtpSession", leadOtpSessionSchema);
+function convertTimestamps(value: unknown): unknown {
+  if (value instanceof Timestamp) return value.toDate();
+  if (Array.isArray(value)) return value.map(convertTimestamps);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = convertTimestamps(v);
+    }
+    return out;
+  }
+  return value;
+}
 
-export const WhatsAppInboundModel = mongoose.model(
-  "WhatsAppInbound",
-  whatsAppInboundSchema,
-);
+function converter<T>(): FirestoreDataConverter<T> {
+  return {
+    toFirestore: (data) => data as Record<string, unknown>,
+    fromFirestore: (snap: QueryDocumentSnapshot) =>
+      convertTimestamps(snap.data()) as T,
+  };
+}
+
+// ── Typed collection accessors ────────────────────────────────────────────────
+
+export const usersCol = (): CollectionReference<UserDoc> =>
+  getDb().collection("users").withConverter(converter<UserDoc>());
+
+export const leadsCol = (): CollectionReference<LeadDoc> =>
+  getDb().collection("leads").withConverter(converter<LeadDoc>());
+
+export const walletItemsCol = (): CollectionReference<WalletItemDoc> =>
+  getDb().collection("walletItems").withConverter(converter<WalletItemDoc>());
+
+export const milestoneEventsCol = (): CollectionReference<MilestoneEventDoc> =>
+  getDb().collection("milestoneEvents").withConverter(converter<MilestoneEventDoc>());
+
+export const leadOtpSessionsCol = (): CollectionReference<LeadOtpSessionDoc> =>
+  getDb().collection("leadOtpSessions").withConverter(converter<LeadOtpSessionDoc>());
+
+export const whatsAppInboundCol = (): CollectionReference<WhatsAppInboundDoc> =>
+  getDb().collection("whatsAppInbound").withConverter(converter<WhatsAppInboundDoc>());
+
+// ── Deterministic document IDs (replace Mongo unique indexes) ─────────────────
+
+/** One OTP session per (volunteer, phone). */
+export const otpSessionId = (volunteerId: string, studentPhone: string): string =>
+  `${volunteerId}__${studentPhone}`;
+
+/** One milestone event per (user, milestone number). */
+export const milestoneId = (userId: string, milestoneNumber: number): string =>
+  `${userId}_${milestoneNumber}`;
+
+// ── Small query helpers ───────────────────────────────────────────────────────
+
+/** First document of a query, with Timestamps already converted, or null. */
+export async function firstOf<T>(query: Query<T>): Promise<T | null> {
+  const snap = await query.limit(1).get();
+  return snap.empty ? null : snap.docs[0]!.data();
+}
+
+/** Get a document by id from a collection, or null. */
+export async function getById<T>(
+  col: CollectionReference<T>,
+  id: string,
+): Promise<T | null> {
+  const snap = await col.doc(id).get();
+  return snap.exists ? (snap.data() as T) : null;
+}

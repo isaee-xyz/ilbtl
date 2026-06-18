@@ -1,4 +1,4 @@
-import { UserModel } from "../models/index.js";
+import { usersCol } from "../models/index.js";
 import type { ParsedLoginLocation } from "../utils/validators.js";
 import {
   reverseGeocode,
@@ -42,12 +42,9 @@ export async function applyUserLoginLocation(
   const now = new Date();
   const label = await resolveLocationLabel(coords);
 
-  await UserModel.updateOne(
-    { id: userId },
-    {
-      last_login_location: label,
-      last_login_at: now,
-      updated_at: now,
-    },
-  );
+  await usersCol().doc(userId).update({
+    last_login_location: label,
+    last_login_at: now,
+    updated_at: now,
+  });
 }

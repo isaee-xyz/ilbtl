@@ -1,18 +1,15 @@
-import dns from "dns";
 import "./config/env.js";
-import { connectDb, disconnectDb } from "./config/database.js";
-
-// Windows / some networks block default SRV lookups; Google DNS works for Atlas.
-dns.setServers(["8.8.8.8", "8.8.4.4"]);
+import { connectDb } from "./config/database.js";
+import { usersCol } from "./models/index.js";
 
 async function main() {
   await connectDb();
-  console.log("Atlas connection OK");
+  // A trivial read proves credentials + project access are working.
+  const count = (await usersCol().count().get()).data().count;
+  console.log(`Firestore connection OK (users: ${count})`);
 }
 
-main()
-  .catch((error) => {
-    console.error("Atlas connection failed:", error.message);
-    process.exit(1);
-  })
-  .finally(() => disconnectDb());
+main().catch((error) => {
+  console.error("Firestore connection failed:", error.message);
+  process.exit(1);
+});

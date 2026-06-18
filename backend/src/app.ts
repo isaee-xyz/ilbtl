@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from "express";
 import cors from "cors";
-import mongoose from "mongoose";
+import { isDbInitialized } from "./config/firebase.js";
 import { ensureDatabase } from "./middleware/database.middleware.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import apiRoutes from "./routes/index.js";
@@ -39,8 +39,7 @@ export function buildApp() {
   app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
   const healthCheck = (_req: Request, res: Response) => {
-    const dbReady = mongoose.connection.readyState === 1;
-    if (!dbReady) {
+    if (!isDbInitialized()) {
       return res.status(503).json({
         ok: false,
         db: "disconnected",

@@ -1,7 +1,13 @@
 import { randomUUID } from "crypto";
-import { LeadModel, UserModel, WhatsAppInboundModel } from "../models/index.js";
+import {
+  firstOf,
+  leadsCol,
+  usersCol,
+  whatsAppInboundCol,
+} from "../models/index.js";
 import { verifyLeadFromWhatsAppFirstMessage } from "./lead.service.js";
 import { WHATSAPP_QR_MESSAGE_PREFIX } from "../utils/whatsapp-qr.js";
+import { parseIndianMobile } from "../utils/validators.js";
 
 export interface ParsedInboundMessage {
   messageId: string | null;
@@ -290,10 +296,6 @@ function extractScoutRef(text: string): string | null {
   return match?.[1]?.toUpperCase() ?? null;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /** Volunteer name from QR pre-fill: "Interested to know more about the courses {name}" */
 function extractVolunteerNameFromQrMessage(text: string): string | null {
   const trimmed = text.trim();
@@ -316,7 +318,9 @@ async function matchVolunteerFromMessage(text: string): Promise<{
   const scoutRefFromText = extractScoutRef(text);
 
   if (scoutRefFromText) {
-    const volunteer = await UserModel.findOne({ scout_ref: scoutRefFromText }).lean();
+    const volunteer = await firstOf(
+      usersCol().where("scout_ref", "==", scoutRefFromText),
+    );
     if (volunteer) {
       return {
         volunteerId: volunteer.id,
@@ -329,9 +333,12 @@ async function matchVolunteerFromMessage(text: string): Promise<{
 
   const volunteerName = extractVolunteerNameFromQrMessage(text);
   if (volunteerName) {
-    const volunteer = await UserModel.findOne({
-      full_name: { $regex: new RegExp(`^${escapeRegExp(volunteerName)}$`, "i") },
-    }).lean();
+    // Firestore has no case-insensitive query — scan volunteers (small set).
+    const target = volunteerName.toLowerCase();
+    const snap = await usersCol().get();
+    const volunteer = snap.docs
+      .map((d) => d.data())
+      .find((u) => u.full_name.toLowerCase() === target);
     if (volunteer) {
       return {
         volunteerId: volunteer.id,
@@ -349,9 +356,9 @@ export async function processInboundWhatsApp(
   parsed: ParsedInboundMessage,
 ): Promise<WebhookProcessResult> {
   if (parsed.messageId) {
-    const existing = await WhatsAppInboundModel.findOne({
-      gupshup_message_id: parsed.messageId,
-    }).lean();
+    const existing = await firstOf(
+      whatsAppInboundCol().where("gupshup_message_id", "==", parsed.messageId),
+    );
     if (existing) {
       return { saved: false, duplicate: true, inboundId: existing.id };
     }
@@ -391,27 +398,23 @@ export async function processInboundWhatsApp(
       });
     }
   } else {
-    const lead = await LeadModel.findOne({
-      student_phone: { $regex: `${parsed.fromPhone.slice(-10)}$` },
-    })
-      .sort({ created_at: -1 })
-      .lean();
+    // Match the sender's number against a stored (normalised) lead phone.
+    const parsedPhone = parseIndianMobile(parsed.fromPhone);
+    const lead = parsedPhone.ok
+      ? await firstOf(leadsCol().where("student_phone", "==", parsedPhone.phone))
+      : null;
     if (lead) {
       matchedLeadId = lead.id;
-      await LeadModel.updateOne(
-        { id: lead.id },
-        {
-          $set: {
-            whatsapp_replied_at: repliedAt,
-            whatsapp_reply_text: parsed.text,
-          },
-        },
-      );
+      await leadsCol().doc(lead.id).update({
+        whatsapp_replied_at: repliedAt,
+        whatsapp_reply_text: parsed.text,
+      });
     }
   }
 
-  const inbound = await WhatsAppInboundModel.create({
-    id: randomUUID(),
+  const inboundId = randomUUID();
+  await whatsAppInboundCol().doc(inboundId).set({
+    id: inboundId,
     gupshup_message_id: parsed.messageId,
     from_phone: parsed.fromPhone,
     to_phone: parsed.toPhone,
@@ -430,7 +433,7 @@ export async function processInboundWhatsApp(
   return {
     saved: true,
     duplicate: false,
-    inboundId: inbound.id,
+    inboundId,
     matchedLeadId,
     matchedVolunteerId,
     leadVerified,

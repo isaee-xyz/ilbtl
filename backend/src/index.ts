@@ -19,6 +19,6 @@ connectDb()
     });
   })
   .catch((err) => {
-    console.error("Failed to connect to MongoDB:", err);
+    console.error("Failed to initialise Firestore:", err);
     process.exit(1);
   });
